@@ -1,0 +1,5 @@
+__pycache__/
+*.sif
+*.pt
+*.tmp
+/sio2-si-only/
