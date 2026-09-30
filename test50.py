@@ -849,7 +849,7 @@ def generate(args):
     settings = dict(
         checkpoint_sha256=digest(args.checkpoint), reverse_steps=args.reverse_steps,
         deterministic_steps=args.deterministic_steps, start_sigma=args.start_sigma,
-        sigma_min=args.sigma_min, thermal_scale=args.thermal_scale,
+        sigma_min=args.sigma_min, thermal_scale=args.thermal_scale, init=args.init,
         seed=args.seed, device=str(device), cutoff_angstrom=cutoff,
     )
     total = args.reverse_steps
@@ -869,6 +869,16 @@ def generate(args):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
         pos = torch.tensor(ck["start_positions_angstrom"], dtype=torch.float32, device=device)
+        if args.init == "crystal-noised":
+            # ここが本題: 以下の焼きなましループは、posが「sigma=start_sigmaの拡散済み状態」
+            # であることを前提にした更新式(variance_drop, score_stepなど)を使っているのに、
+            # --init crystal(デフォルト)ではposは実際には一切ノイズを受けていない綺麗な結晶
+            # 座標のまま渡されてしまう(ループ内で暗黙にノイズが注入されるのを待つだけ)。
+            # crystal-noisedでは、学習時のRattleParticles(sigma_min=sigma_max=start_sigma)と
+            # 全く同じノイズモデル(eps~N(0,1); pos += start_sigma*eps)を明示的に一度適用して
+            # から焼きなましを始める。これで「拡散過程で実際にsigma=start_sigmaまで拡散させた
+            # ノイズ構造」から出発する、本来の意味でのreverse diffusionになる。
+            pos = pos + args.start_sigma * torch.randn_like(pos)
         completed = 0
         trajectory = np.lib.format.open_memmap(
             output / "positions.npy", mode="w+", dtype=np.float32, shape=(total + 1, len(pos), 3)
@@ -1016,6 +1026,15 @@ def parser():
     p.set_defaults(handler=train)
 
     p = sub.add_parser("generate", help="annealed-Langevin / variance-exploding reverse-SDE sampler with a DDIM polish tail")
+    p.add_argument("--init", choices=("crystal", "crystal-noised"), default="crystal",
+                   help="'crystal' (default, test38's original behavior): start from the clean "
+                        "training frame and let the annealed-Langevin loop's own noise injection "
+                        "be the only corruption applied. 'crystal-noised': explicitly corrupt the "
+                        "clean frame with the SAME noise model training uses "
+                        "(pos += start_sigma * randn, i.e. RattleParticles(sigma=start_sigma)) "
+                        "before the reverse loop starts, so generation genuinely begins from a "
+                        "forward-diffused noisy structure at sigma=start_sigma, not a clean one "
+                        "the loop only pretends is already noised.")
     p.add_argument("--reverse-steps", type=count, default=300)  # sigmaスケジュールの段数(細かいほど1歩あたりの補正が小さくなる)
     p.add_argument("--deterministic-steps", type=nonnegative_count, default=30)  # 末尾何ステップをDDIM風の決定論的更新にするか
     p.add_argument("--start-sigma", type=positive, default=0.75)  # 生成開始時のノイズレベル

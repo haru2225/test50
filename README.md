@@ -73,6 +73,30 @@ python test50.py generate --checkpoint sio2-si-only/checkpoint1/checkpoint.pt \
     --output sio2-si-only/checkpoint1/generated --reverse-steps 3000 --deterministic-steps 300 --device cuda
 ```
 
+## Starting `generate` from an actually-noised structure: `--init crystal-noised`
+
+test38's original `generate()` always starts from the clean training frame
+(`ck["start_positions_angstrom"]`) and just runs the annealed-Langevin schedule against it — the
+schedule's own noise injection at the early (high-sigma) steps is the *only* corruption that ever
+happens, and it's easy to misread a run as "generation from noise" when `deterministic_steps` is
+set too high and that injection barely happens at all (see the test50-v2 case below).
+
+`--init crystal-noised` fixes this by explicitly forward-diffusing the clean frame *before* the
+loop starts: `pos += start_sigma * randn_like(pos)` — the exact same noise model `RattleParticles`
+uses during training. This is a real "start from a genuinely sigma=start_sigma-noised structure and
+watch the reverse SDE denoise it back into a crystal" test, not an implicit one. Use it together
+with a real stochastic annealing budget (`--deterministic-steps` well below `--reverse-steps`) to
+actually see the Si sublattice condense in `trajectory.extxyz`:
+
+```bash
+python test50.py generate --checkpoint sio2-si-only/checkpoint1/checkpoint.pt \
+    --output sio2-si-only/checkpoint1/generated_noised --init crystal-noised \
+    --reverse-steps 3000 --deterministic-steps 300 --trajectory-stride 10 --device cuda
+```
+
+`--init crystal` (unchanged default) reproduces the original test38 behavior exactly, for
+backward compatibility / A-B comparison.
+
 ## Watching the structure form: `trajectory.extxyz`
 
 `generate` always writes `final.extxyz` (last frame only) and, unless `--trajectory-stride 0` is
@@ -95,3 +119,12 @@ step — but has **not fully converged** at only 300 steps: the final structure'
 13°). test47-49's own SiO2 generation uses 2900+100 steps for the same box; **increasing
 `--reverse-steps` well above test38's clay-tuned default of 300 is the most likely lever to close
 this gap** (untested at higher step counts so far).
+
+**Pitfall found the hard way**: a follow-up run set `--deterministic-steps` equal to
+`--reverse-steps` (both 300), which makes `stochastic_steps = reverse_steps - deterministic_steps
+= 0` — every step runs the deterministic DDIM branch, no annealed noise is ever injected. Starting
+from `--init crystal` (the default, a clean frame), that run barely moved (total displacement 0.14
+Å) and scored *better* than real MD on every metric — not because generation succeeded, but because
+it was never actually asked to recover from noise. Keep `--deterministic-steps` a small tail
+fraction of `--reverse-steps` (e.g. 10%), and use `--init crystal-noised` (above) if you want an
+unambiguous "did it actually reconstruct a crystal from noise" test.

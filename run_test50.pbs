@@ -51,6 +51,7 @@ case "$stage" in
         ;;
     generate)
         args+=(--checkpoint "${CHECKPOINT:?Set CHECKPOINT}" --output "${OUTPUT:?Set OUTPUT}")
+        [[ -n "${INIT:-}"                 ]] && args+=(--init "$INIT")
         [[ -n "${REVERSE_STEPS:-}"        ]] && args+=(--reverse-steps "$REVERSE_STEPS")
         [[ -n "${DETERMINISTIC_STEPS:-}"  ]] && args+=(--deterministic-steps "$DETERMINISTIC_STEPS")
         [[ -n "${START_SIGMA:-}"          ]] && args+=(--start-sigma "$START_SIGMA")
