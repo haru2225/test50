@@ -49,6 +49,8 @@ case "$stage" in
         [[ -n "${SIGMA_MAX:-}"           ]] && args+=(--sigma-max "$SIGMA_MAX")
         [[ -n "${VALIDATION_FRACTION:-}" ]] && args+=(--validation-fraction "$VALIDATION_FRACTION")
         [[ -n "${LOG_EVERY:-}"           ]] && args+=(--log-every "$LOG_EVERY")
+        [[ -n "${IRREPS_HIDDEN:-}"       ]] && args+=(--irreps-hidden "$IRREPS_HIDDEN")
+        [[ -n "${IRREPS_EDGE:-}"         ]] && args+=(--irreps-edge "$IRREPS_EDGE")
         ;;
     generate)
         args+=(--checkpoint "${CHECKPOINT:?Set CHECKPOINT}" --output "${OUTPUT:?Set OUTPUT}")

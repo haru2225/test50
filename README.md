@@ -64,6 +64,30 @@ different ones (`train`'s resume path checks the full settings dict and refuses 
 `cutoff`/`sigma_max`/`updates` included) — retraining with the new defaults means a **fresh**
 `--output` directory, not resuming an old one.
 
+## `--irreps-hidden` / `--irreps-edge`: raising the spherical-harmonics l_max
+
+test38's `NequIP_TimeEmbed` hardcodes its irreps (l≤1 hidden, l≤2 edge spherical harmonics) inside
+`architecture()`; test50 exposes them as `train` flags instead (default unchanged: `"64x0e + 32x1e"`
+/ `"4x0e + 4x1e + 2x2e"`, identical to test38 unless overridden). `generate` needs no equivalent
+flag — it always rebuilds the model from whatever irreps the checkpoint itself was trained with.
+
+To raise l_max to 4 (more angular/orientational detail per edge and node — one candidate fix for
+the "can't tell which lattice site" problem, since Si-Si-Si angles alone may be too coarse a
+signal at l≤1):
+
+```bash
+python test50.py train --dataset ... --output ... \
+    --irreps-hidden "64x0e + 32x1e + 16x2e + 8x3e + 4x4e" \
+    --irreps-edge   "4x0e + 4x1e + 2x2e + 2x3e + 1x4e"
+```
+
+(test47/48's own l≤5 stack truncated by one order.) **This is the same lever that caused test49's
+CUDA out-of-memory issue** — e3nn's tensor-product path count and intermediate-tensor size grow
+steeply with l_max (measured there: l≤5 vs l≤1 was a ~17x larger per-edge intermediate tensor), so
+raising this may need a smaller `--batch-size` or more GPU memory. Untested at l≤4 specifically;
+only smoke-tested here for a few CPU updates to confirm it trains and checkpoints/reloads
+correctly.
+
 ## Files
 
 - `test50.py` — prepare/train/generate, single self-contained script. Unlike test45-49, it never

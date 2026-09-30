@@ -234,13 +234,16 @@ class InitialEmbedding(nn.Module):
         return data
 
 
-def architecture(num_species, cutoff):
+def architecture(num_species, cutoff, irreps_hidden="64x0e + 32x1e", irreps_edge="4x0e + 4x1e + 2x2e"):
     # モデルの構造(irreps=e3nnの回転等変な特徴量の型、畳み込み層の数など)を
     # 1つの辞書にまとめたもの。チェックポイントに保存しておき、生成時に
     # 同じ構造のモデルを再構築するために使う。test37と同じ構造。
+    # irreps_hidden/irreps_edge引数はtest50独自の追加(test38は引数なしのハードコード)。
+    # デフォルト値(l<=1隠れ層/l<=2エッジ)はtest38と全く同じで、明示的に--irreps-hidden/
+    # --irreps-edgeを渡さない限り挙動は変わらない。
     return dict(num_species=num_species, cutoff_angstrom=cutoff,
                 irreps_node_x="8x0e", irreps_node_z="8x0e",
-                irreps_hidden="64x0e + 32x1e", irreps_edge="4x0e + 4x1e + 2x2e",
+                irreps_hidden=irreps_hidden, irreps_edge=irreps_edge,
                 irreps_out="1x1e", num_convs=3, radial_neurons=[16, 64], num_neighbors=12)
 
 
@@ -768,12 +771,13 @@ def train(args):
     settings = dict(
         dataset_sha256=meta["sha256"], metadata_sha256=digest(args.dataset / "metadata.json"),
         cutoff=args.cutoff, large_cutoff=args.large_cutoff,
+        irreps_hidden=args.irreps_hidden, irreps_edge=args.irreps_edge,
         sigma_min=args.sigma_min, sigma_max=args.sigma_max,
         batch_size=args.batch_size, learning_rate=args.learning_rate,
         seed=args.seed, split_frame=split, device=str(device), log_every=args.log_every,
         warm_start_sha256=(digest(args.warm_start) if args.warm_start else None),
     )
-    config = architecture(len(meta["species"]), args.cutoff)
+    config = architecture(len(meta["species"]), args.cutoff, args.irreps_hidden, args.irreps_edge)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     model = build_time_model(config, device)
@@ -1096,6 +1100,15 @@ def parser():
     # (Si-Si最近接距離が~2.97Aなので、sigma=1.5は既に「原子がほぼ完全にかき乱された」
     # 領域までσレンジを広げることになる。)
     p.add_argument("--sigma-max", type=positive, default=1.5)  # 学習時に使うノイズ幅の上限(生成時のt正規化にも使われる)
+    # test50独自の追加(test38にはこの2つのCLI引数はなく、architecture()内にハードコード
+    # されている)。デフォルトはtest38と全く同じ(l<=1隠れ層/l<=2エッジ)で、明示的に
+    # 渡さない限り挙動は変わらない。球面調和展開をl=4まで広げたい場合の例:
+    #   --irreps-hidden "64x0e + 32x1e + 16x2e + 8x3e + 4x4e" \
+    #   --irreps-edge   "4x0e + 4x1e + 2x2e + 2x3e + 1x4e"
+    # (test47/48のl<=5構成を1段階切り詰めたもの。l_maxを上げるほどe3nnのテンソル積の
+    # パス数・中間テンソルが急増しGPUメモリを多く使う -- test49のCUDA OOMと同じ理由。)
+    p.add_argument("--irreps-hidden", type=str, default="64x0e + 32x1e")
+    p.add_argument("--irreps-edge", type=str, default="4x0e + 4x1e + 2x2e")
     p.add_argument("--validation-fraction", type=positive, default=0.1)
     p.add_argument("--log-every", type=count, default=100)
     p.set_defaults(handler=train)
