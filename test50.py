@@ -675,6 +675,28 @@ def prepare(args):
     # 座標はそのままSiだけ間引く(座標変換や平均化は一切行わない = 部分集合選択)。
     # セルは元のまま(粗視化で箱が縮むわけではなく、原子の集合が減るだけ)。
     si_positions = np.ascontiguousarray(frames[:, si_indices, :]).astype(np.float32)
+
+    replicate = args.replicate
+    if replicate > 1:
+        # 箱をreplicate^3倍にタイル化する: cutoffを安全に広げたい(半箱を大きくしたい)が
+        # 新規にその箱サイズでMDを回していない場合の、原子配置の人工的な拡大手段。
+        # 各セルの周期像を実際の原子として複製するだけなので、半箱は必ずreplicate倍になり、
+        # cutoff/large_cutoffの安全上限(半箱未満、下のtrain()のガードを参照)もreplicate倍
+        # まで安全に引き上げられる。
+        # 注意(重要な限界): 複製された像は元の配置を厳密にコピーしただけで、独立した
+        # 熱ゆらぎを持つ別配置ではない。本物により大きな箱でMDを回した場合と違い、
+        # replicate^3個の像は互いに完全に相関している(人工的な並進対称性を持つ)。
+        # cutoff拡大の効果を見るための近似的な手段であり、本物の大箱MDの代用にはならない。
+        n = replicate
+        shifts = np.array([(i, j, k) for i in range(n) for j in range(n) for k in range(n)],
+                           dtype=np.float32)  # (n^3, 3)
+        old_cell_length = lengths[:, 0].astype(np.float32)  # (frames,)
+        # (frames, n_si, 3) + (n^3, 1, 3)*(frames,1,1,1) -> (frames, n^3, n_si, 3)
+        tiled = si_positions[:, None, :, :] + shifts[None, :, None, :] * old_cell_length[:, None, None, None]
+        si_positions = np.ascontiguousarray(tiled.reshape(len(frames), -1, 3)).astype(np.float32)
+        lengths = lengths * n
+
+    n_sites = si_positions.shape[1]
     cells = np.zeros((len(frames), 3, 3), dtype=np.float64)
     for axis in range(3):
         cells[:, axis, axis] = lengths[:, 0].astype(np.float64)
@@ -683,7 +705,7 @@ def prepare(args):
     np.save(output / "positions.npy", si_positions)
     np.save(output / "cells.npy", cells)
     species = [{"name": "Si", "atomic_number": 14, "mass_amu": 28.0855}]
-    type_ids = [0] * len(si_indices)
+    type_ids = [0] * n_sites
 
     source_meta_path = args.reference_frames.with_name(
         args.reference_frames.stem + "_metadata.json")
@@ -696,14 +718,21 @@ def prepare(args):
                     "subset), every O atom of every SiO4 tetrahedron dropped outright "
                     "(not averaged/merged)"),
         original_atom_count=int(numbers.shape[0]), si_atom_count=int(len(si_indices)),
+        replicate=replicate, replicated_site_count=n_sites,
+        replicate_caveat=(None if replicate == 1 else
+            f"positions are tiled {replicate}x{replicate}x{replicate} ({replicate**3} exact "
+            "periodic copies of the same configuration per frame) to safely enlarge the box for "
+            "a bigger --cutoff, NOT an independent larger-box MD run -- the copies are perfectly "
+            "correlated with each other, unlike real thermal disorder at that box size."),
         source_reference_frames=str(args.reference_frames.resolve()),
         source_reference_frames_metadata=source_meta, source_stride=args.stride,
         scientific_caveat=CAVEAT,
         sha256={name: digest(output / name) for name in ("positions.npy", "cells.npy")},
     )
     save_json(output / "metadata.json", meta)
-    print(f"Prepared {len(frames)} frames, {len(si_indices)} Si CG sites "
-          f"(dropped {numbers.shape[0] - len(si_indices)} O atoms/frame): {output}")
+    print(f"Prepared {len(frames)} frames, {n_sites} Si CG sites "
+          f"(dropped {numbers.shape[0] - len(si_indices)} O atoms/frame"
+          f"{f', replicated {replicate}x{replicate}x{replicate}' if replicate > 1 else ''}): {output}")
 
 
 def train(args):
@@ -715,6 +744,17 @@ def train(args):
         raise ValueError("validation-fraction must be between zero and 0.5")
     if args.sigma_max < 0.001 or args.large_cutoff < args.cutoff:
         raise ValueError("Require sigma-max >= 0.001 and large-cutoff >= cutoff")
+    # test50固有のガード(test38にはない): cutoff/large_cutoffが半箱以上だと、同じ原子対が
+    # 2つ以上の周期像を通じて二重に繋がってしまう(test33/48で文書化された周期像重複バグ)。
+    # このバグは黙って学習データを壊すだけで例外を出さないので、ここで明示的に弾く。
+    # (--replicateでタイル化した大きい箱のデータセットなら、より大きいcutoffも安全に通る。)
+    half_box = float(np.asarray(cells)[:, [0, 1, 2], [0, 1, 2]].min()) / 2
+    if args.large_cutoff >= half_box:
+        raise ValueError(
+            f"--large-cutoff ({args.large_cutoff}) must be strictly less than half the box "
+            f"({half_box:.4f} A) -- otherwise the same atom pair gets connected through 2+ "
+            f"periodic images at once (the test33/48 duplicate-periodic-image bug). Use a smaller "
+            f"cutoff, or rebuild the dataset with `prepare --replicate N` to enlarge the box.")
     device = device_for(args.device)
     output = args.output.resolve() if args.resume else new_output(args.output)
     checkpoint = output / "checkpoint.pt"
@@ -1027,6 +1067,11 @@ def parser():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--temperature-k", type=positive, default=300.0)
     p.add_argument("--stride", type=count, default=1)
+    p.add_argument("--replicate", type=count, default=1,
+                   help="Tile the box N x N x N (exact periodic copies, not independent thermal "
+                        "samples) to safely enlarge it for a bigger --cutoff at train time -- e.g. "
+                        "--replicate 2 turns the 13.573 A box into 27.146 A (half-box 13.573 A), "
+                        "safely covering --cutoff 8. Default 1 (no tiling, unchanged behavior).")
     p.set_defaults(handler=prepare)
 
     p = sub.add_parser("train", help="sigma-conditioned NequIP_TimeEmbed + RattleParticles(sigma_min, sigma_max) + displacement MSE")
@@ -1034,20 +1079,18 @@ def parser():
     p.add_argument("--warm-start", type=Path, default=None,
                    help="Plain (non-time-conditioned) NequIP checkpoint, same architecture as "
                         "this dataset, to initialize shared weights from")
-    p.add_argument("--updates", type=count, default=20000)  # 勾配更新の総回数(元は6000。学習量を増やす要望に合わせて引き上げ)
+    p.add_argument("--updates", type=count, default=50000)  # 勾配更新の総回数(元は6000→20000→50000と要望に合わせて引き上げ)
     p.add_argument("--batch-size", type=count, default=16)
     p.add_argument("--learning-rate", type=positive, default=2.e-4)
-    # test38の元のデフォルトは10.0(粘土系の大きな箱用)だったが、このSiO2結晶の箱は
-    # 13.573A(半箱~6.7865A)しかなく、それを超えるcutoffは同じ原子対が2つ以上の周期像を
-    # 通じて二重に繋がってしまう(test33/48で文書化された周期像重複バグ)。以前は5.0/5.0
-    # だったが、より広い近傍情報を使えるように半箱ぎりぎりまで引き上げた: cutoff=6.5
-    # (半箱まで0.29Aの余裕)、large-cutoff=6.7(cutoffより0.2Aだけ広く候補エッジを作り、
-    # sigma-maxを上げたことによるノイズでのエッジ変化に多少の余裕を持たせる。それでも
-    # 半箱(6.7865A)未満に収まっている)。cutoff=8のような値は、この箱サイズでは
-    # large-cutoffをcutoffと同じかそれ以上にできず原理的に安全に使えない
-    # (箱自体をタイル化して拡大しない限り不可能)。
-    p.add_argument("--cutoff", type=positive, default=6.5)  # モデルが実際に使うグラフcutoff
-    p.add_argument("--large-cutoff", type=positive, default=6.7)  # ノイズを加える前に候補として作っておくcutoff(cutoff以上必須)
+    # test38の元のデフォルトは10.0(粘土系の大きな箱用)。このSiO2結晶の素の箱は13.573A
+    # (半箱~6.7865A)しかなく、それを超えるcutoffは周期像重複バグ(test33/48)を踏むため、
+    # 以前は安全な範囲内で6.5/6.7にとどめていた。今回cutoff=8の要望に対応するため、
+    # `prepare --replicate 2`で箱を2x2x2タイル化する前提に変更: 箱が27.146A(半箱13.573A)
+    # になるので、cutoff=8/large-cutoff=8.2は余裕を持って安全(半箱まで5.57A以上の余裕)。
+    # train()側にもガードを追加済みで、--replicateしていない小さい箱のデータセットに
+    # このデフォルトをうっかり使うと、黙って壊れる代わりに明示的なエラーで弾かれる。
+    p.add_argument("--cutoff", type=positive, default=8.0)  # モデルが実際に使うグラフcutoff(--replicate 2の箱が前提)
+    p.add_argument("--large-cutoff", type=positive, default=8.2)  # ノイズを加える前に候補として作っておくcutoff(cutoff以上必須)
     p.add_argument("--sigma-min", type=positive, default=0.001)
     # 元は0.75(test38/DM2共通のデフォルト)。ノイズ最大値を増やす要望に合わせて2倍の1.5に。
     # (Si-Si最近接距離が~2.97Aなので、sigma=1.5は既に「原子がほぼ完全にかき乱された」

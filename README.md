@@ -18,29 +18,46 @@ distance, not a real Si-Si bond).
 `test50.py prepare` builds the CG dataset from the beta-cristobalite NVT reference frames already
 validated for test47/48/49 (`simu_data/reference_frames.npz`, bundled here — 184 frames, 192 atoms
 = 64 Si + 128 O, cubic cell 13.573 Å, 300 K NVT) by selecting the 64 Si indices per frame and
-discarding the 128 O positions; the cell is carried through unchanged (only the atom set shrinks).
+discarding the 128 O positions; the cell is carried through unchanged (only the atom set shrinks),
+unless `--replicate` tiles it larger (below).
+
+## `prepare --replicate N`: tiling the box for a bigger `--cutoff`
+
+The bundled box is only 13.573 Å across (half-box 6.7865 Å), which puts a **hard ceiling** on
+`--cutoff`/`--large-cutoff` regardless of tuning: anything ≥ half the box connects the same atom
+pair through 2+ periodic images at once (the test33/48 duplicate-periodic-image bug). `--cutoff 8`
+is unsafe on this box no matter what.
+
+`--replicate N` tiles the Si positions `N x N x N` (exact periodic copies) and scales the cell by
+`N`, so the box (and its safe cutoff ceiling) grows by the same factor — `--replicate 2` turns
+13.573 Å into 27.146 Å (half-box 13.573 Å), comfortably covering `--cutoff 8`. **This is not a
+substitute for a real larger-box MD run**: the `N^3` copies per frame are perfectly correlated
+exact duplicates of the same configuration, not independent thermal samples — it only exists to
+let a bigger cutoff see further without new simulation data. `train` refuses (see the guard below)
+to run with a `--cutoff`/`--large-cutoff` that isn't strictly safe for whatever dataset was
+actually built, replicated or not, so this can't be silently misused.
+
+```bash
+python test50.py prepare --replicate 2 --output sio2-si-only/dataset-2x2x2   # 64 -> 512 Si sites
+```
 
 ## Numeric differences from test38.py's own argparse defaults
 
 Every default not listed here is untouched from test38.py.
 
-- **`--cutoff`/`--large-cutoff`: 6.5 / 6.7** (was 5.0/5.0). test38's own default is 10.0/10.0,
-  tuned for the clay system's larger box. This SiO2 box is only 13.573 Å across (half-box
-  **~6.7865 Å**) — anything ≥ that hits the duplicate-periodic-image bug test33/48 document (a
-  cutoff bigger than half the box connects the same atom pair through 2+ periodic images at once).
-  **This is a hard ceiling on this box, not a tuning choice** — `--cutoff 8` (as wide as was asked
-  for at one point) is unsafe here no matter what, and can only be done by tiling the reference
-  data into a larger supercell first (not implemented). 6.5/6.7 is as close to that ~6.7865 Å
-  ceiling as is comfortably safe, with a small 0.2 Å margin between `cutoff` and `large-cutoff` for
-  the larger `--sigma-max` below (test47/48/49 used `large_cutoff==cutoff`, i.e. zero margin — this
-  is an incremental improvement, not a full fix; a rattle draw larger than ~0.2 Å can still land
-  outside that margin).
+- **`--cutoff`/`--large-cutoff`: 8.0 / 8.2** (was 5.0/5.0, then 6.5/6.7). test38's own default is
+  10.0/10.0, tuned for the clay system's larger box. These new defaults assume a `--replicate 2`
+  dataset (half-box 13.573 Å, so 8.0/8.2 has 5+ Å of margin to spare) — **do not use the default
+  `train` invocation against a `--replicate 1` (untiled) dataset**; `train` now checks the actual
+  box size from the dataset's own `cells.npy` and raises a clear error instead of silently
+  corrupting the graph if `--large-cutoff` isn't strictly less than half of it, so this mismatch is
+  caught immediately rather than producing a silently-wrong checkpoint.
 - **`--sigma-max`: 1.5** (was 0.75, test38/DM2's shared default). Si-Si nearest-neighbor distance
   is ~2.97 Å, so this already reaches "the atom is effectively scrambled" territory — training now
   covers a genuinely wider corruption range. Match this with `generate --start-sigma 1.5` (and
   `--init crystal-noised`, see below) to actually exercise the new range at generation time —
   `generate`'s own `--start-sigma` default (0.75) is untouched, so it must be passed explicitly.
-- **`--updates`: 20000** (was 6000) — a longer training budget.
+- **`--updates`: 50000** (was 6000, then 20000) — a longer training budget.
 
 A checkpoint trained with these values cannot `--resume` into a directory whose checkpoint used
 different ones (`train`'s resume path checks the full settings dict and refuses on any mismatch,
@@ -70,12 +87,13 @@ module load singularity
 singularity build test50.sif Singularity.def
 # Apptainer: apptainer build test50.sif Singularity.def
 
-qsub -P PROJECT_ID -v STAGE=prepare,OUTPUT=sio2-si-only/dataset-pilot run_test50.pbs
+qsub -P PROJECT_ID -v STAGE=prepare,OUTPUT=sio2-si-only/dataset-2x2x2,REPLICATE=2 run_test50.pbs
 
-qsub -P PROJECT_ID -v STAGE=train,DATASET=sio2-si-only/dataset-pilot,OUTPUT=sio2-si-only/checkpoint1 \
+qsub -P PROJECT_ID -v STAGE=train,DATASET=sio2-si-only/dataset-2x2x2,OUTPUT=sio2-si-only/checkpoint3 \
     run_test50.pbs
-# override any test50.py train flag via qsub -v, e.g.:
-# qsub -P PROJECT_ID -v STAGE=train,DATASET=...,OUTPUT=...,UPDATES=6000,BATCH_SIZE=16 run_test50.pbs
+# cutoff=8.0/8.2, sigma-max=1.5, updates=50000 are now the defaults (assume the replicated
+# dataset above) -- override any test50.py train flag via qsub -v, e.g.:
+# qsub -P PROJECT_ID -v STAGE=train,DATASET=...,OUTPUT=...,UPDATES=20000,BATCH_SIZE=16 run_test50.pbs
 
 qsub -P PROJECT_ID -v STAGE=generate,CHECKPOINT=sio2-si-only/checkpoint1/checkpoint.pt,OUTPUT=sio2-si-only/checkpoint1/generated,REVERSE_STEPS=3000,DETERMINISTIC_STEPS=300 \
     run_test50.pbs
@@ -84,10 +102,10 @@ qsub -P PROJECT_ID -v STAGE=generate,CHECKPOINT=sio2-si-only/checkpoint1/checkpo
 Locally (no PBS/Singularity), the same three commands directly:
 
 ```bash
-python test50.py prepare --output sio2-si-only/dataset-pilot   # uses bundled simu_data/
-python test50.py train --dataset sio2-si-only/dataset-pilot --output sio2-si-only/checkpoint1 --device cuda
-python test50.py generate --checkpoint sio2-si-only/checkpoint1/checkpoint.pt \
-    --output sio2-si-only/checkpoint1/generated --reverse-steps 3000 --deterministic-steps 300 --device cuda
+python test50.py prepare --replicate 2 --output sio2-si-only/dataset-2x2x2   # uses bundled simu_data/
+python test50.py train --dataset sio2-si-only/dataset-2x2x2 --output sio2-si-only/checkpoint3 --device cuda
+python test50.py generate --checkpoint sio2-si-only/checkpoint3/checkpoint.pt \
+    --output sio2-si-only/checkpoint3/generated --reverse-steps 3000 --deterministic-steps 300 --device cuda
 ```
 
 ## Starting `generate` from an actually-noised structure: `--init crystal-noised`

@@ -35,6 +35,7 @@ case "$stage" in
         [[ -n "${REFERENCE_FRAMES:-}" ]] && args+=(--reference-frames "$REFERENCE_FRAMES")
         [[ -n "${TEMPERATURE_K:-}"    ]] && args+=(--temperature-k "$TEMPERATURE_K")
         [[ -n "${STRIDE:-}"           ]] && args+=(--stride "$STRIDE")
+        [[ -n "${REPLICATE:-}"        ]] && args+=(--replicate "$REPLICATE")
         ;;
     train)
         args+=(--dataset "${DATASET:?Set DATASET}" --output "${OUTPUT:?Set OUTPUT}")
