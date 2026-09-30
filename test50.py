@@ -234,13 +234,14 @@ class InitialEmbedding(nn.Module):
         return data
 
 
-def architecture(num_species, cutoff, irreps_hidden="64x0e + 32x1e", irreps_edge="4x0e + 4x1e + 2x2e"):
+def architecture(num_species, cutoff, irreps_hidden="64x0e + 32x1e + 16x2e + 8x3e + 4x4e",
+                  irreps_edge="4x0e + 4x1e + 2x2e + 2x3e + 1x4e"):
     # モデルの構造(irreps=e3nnの回転等変な特徴量の型、畳み込み層の数など)を
     # 1つの辞書にまとめたもの。チェックポイントに保存しておき、生成時に
     # 同じ構造のモデルを再構築するために使う。test37と同じ構造。
-    # irreps_hidden/irreps_edge引数はtest50独自の追加(test38は引数なしのハードコード)。
-    # デフォルト値(l<=1隠れ層/l<=2エッジ)はtest38と全く同じで、明示的に--irreps-hidden/
-    # --irreps-edgeを渡さない限り挙動は変わらない。
+    # irreps_hidden/irreps_edge引数はtest50独自の追加(test38は引数なしのハードコード、
+    # l<=1隠れ層/l<=2エッジ固定)。ここでのデフォルトはl<=4構成(下のtrainの--irreps-hidden/
+    # --irreps-edgeのデフォルトと合わせてある)。
     return dict(num_species=num_species, cutoff_angstrom=cutoff,
                 irreps_node_x="8x0e", irreps_node_z="8x0e",
                 irreps_hidden=irreps_hidden, irreps_edge=irreps_edge,
@@ -1100,15 +1101,15 @@ def parser():
     # (Si-Si最近接距離が~2.97Aなので、sigma=1.5は既に「原子がほぼ完全にかき乱された」
     # 領域までσレンジを広げることになる。)
     p.add_argument("--sigma-max", type=positive, default=1.5)  # 学習時に使うノイズ幅の上限(生成時のt正規化にも使われる)
-    # test50独自の追加(test38にはこの2つのCLI引数はなく、architecture()内にハードコード
-    # されている)。デフォルトはtest38と全く同じ(l<=1隠れ層/l<=2エッジ)で、明示的に
-    # 渡さない限り挙動は変わらない。球面調和展開をl=4まで広げたい場合の例:
-    #   --irreps-hidden "64x0e + 32x1e + 16x2e + 8x3e + 4x4e" \
-    #   --irreps-edge   "4x0e + 4x1e + 2x2e + 2x3e + 1x4e"
-    # (test47/48のl<=5構成を1段階切り詰めたもの。l_maxを上げるほどe3nnのテンソル積の
-    # パス数・中間テンソルが急増しGPUメモリを多く使う -- test49のCUDA OOMと同じ理由。)
-    p.add_argument("--irreps-hidden", type=str, default="64x0e + 32x1e")
-    p.add_argument("--irreps-edge", type=str, default="4x0e + 4x1e + 2x2e")
+    # test50独自の追加(test38にはこの2つのCLI引数はなく、architecture()内にl<=1隠れ層/
+    # l<=2エッジでハードコードされている)。要望により、l=4まで広げた構成
+    # (test47/48のl<=5構成を1段階切り詰めたもの)をデフォルトに変更 -- 追加のフラグなしで
+    # l=4になる。l_maxを上げるほどe3nnのテンソル積のパス数・中間テンソルが急増しGPU
+    # メモリを多く使う(test49のCUDA OOMと同じ理由)ので、OOMが出たら--batch-sizeを
+    # 下げること(元のtest38相当のl<=1/l<=2に戻したい場合は明示的に
+    # --irreps-hidden "64x0e + 32x1e" --irreps-edge "4x0e + 4x1e + 2x2e" を渡す)。
+    p.add_argument("--irreps-hidden", type=str, default="64x0e + 32x1e + 16x2e + 8x3e + 4x4e")
+    p.add_argument("--irreps-edge", type=str, default="4x0e + 4x1e + 2x2e + 2x3e + 1x4e")
     p.add_argument("--validation-fraction", type=positive, default=0.1)
     p.add_argument("--log-every", type=count, default=100)
     p.set_defaults(handler=train)
