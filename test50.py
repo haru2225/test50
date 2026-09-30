@@ -29,14 +29,27 @@ cell 13.573 A, 300 K NVT; see that file's sibling `..._metadata.json` for exact 
 provenance) by selecting the 64 Si indices and discarding the 128 O positions per frame; the cell
 is carried through as the same cubic 13.573 A box (only the atom SET shrinks, not the box).
 
-CUTOFF (a data/config point, not a model change -- the ONE numeric difference from test38.py's own
-argparse defaults): test38's own `--cutoff`/`--large-cutoff` default to 10.0, tuned for the clay
-system's larger box. This SiO2 box is only 13.573 A across (half-box ~6.79 A) -- 10 A would hit the
-same duplicate-periodic-image bug test33/48 document (a cutoff bigger than half the box connects
-the same atom pair through 2+ periodic images at once). test50's `train` subcommand therefore
-changes ONLY this default to 5.0/5.0 (test47/48/49's own fix for the same box; `generate` has no
-cutoff flag of its own -- it reads whatever cutoff the checkpoint was trained with). Every other
-argparse default is untouched from test38.py.
+NUMERIC DIFFERENCES FROM test38.py's OWN ARGPARSE DEFAULTS (data/config points, not model changes
+-- every default below this paragraph is still untouched from test38.py):
+  - `--cutoff`/`--large-cutoff`: test38 defaults to 10.0/10.0, tuned for the clay system's larger
+    box. This SiO2 box is only 13.573 A across (half-box ~6.7865 A) -- 10 A hits the
+    duplicate-periodic-image bug test33/48 document (a cutoff bigger than half the box connects the
+    same atom pair through 2+ periodic images at once), so this can NEVER safely go above ~6.7865 A
+    on this box regardless of how it's tuned (would need a larger, tiled supercell to raise it
+    further, e.g. to 8 A -- not implemented here). test50 uses 6.5/6.7 (as close to that hard ceiling
+    as test47/48/49's own `large_cutoff==cutoff` convention comfortably allows, with 6.7 chosen to
+    leave a small rattle margin above 6.5 for `--sigma-max` below -- still an incomplete margin
+    given how large `--sigma-max` now is, same acknowledged limitation as test47/48/49's own README).
+    `generate` has no cutoff flag of its own -- it reads whatever cutoff the checkpoint was trained
+    with.
+  - `--sigma-max`: test38/DM2's common default is 0.75. Raised to 1.5 here (Si-Si nearest-neighbor
+    distance is ~2.97 A, so sigma=1.5 already reaches "the atom is effectively scrambled" territory)
+    to widen how much corruption training actually covers.
+  - `--updates`: test38 defaults to 6000. Raised to 20000 for a longer training budget.
+A checkpoint trained with one of these values cannot resume into an output directory whose
+checkpoint used different values (`train --resume` checks the full settings dict, including
+`cutoff`/`sigma_max`/`updates`, and refuses on any mismatch) -- retraining with the new defaults
+means pointing `--output` at a fresh directory, not resuming the old one.
 
     python test50.py prepare --output sio2-si-only/dataset-pilot   # uses bundled simu_data/
     python test50.py train --dataset sio2-si-only/dataset-pilot \
@@ -1021,17 +1034,25 @@ def parser():
     p.add_argument("--warm-start", type=Path, default=None,
                    help="Plain (non-time-conditioned) NequIP checkpoint, same architecture as "
                         "this dataset, to initialize shared weights from")
-    p.add_argument("--updates", type=count, default=6000)  # 勾配更新の総回数
+    p.add_argument("--updates", type=count, default=20000)  # 勾配更新の総回数(元は6000。学習量を増やす要望に合わせて引き上げ)
     p.add_argument("--batch-size", type=count, default=16)
     p.add_argument("--learning-rate", type=positive, default=2.e-4)
     # test38の元のデフォルトは10.0(粘土系の大きな箱用)だったが、このSiO2結晶の箱は
-    # 13.573A(半箱~6.79A)しかなく、10Aのままだと同じ原子対が2つ以上の周期像を通じて
-    # 二重に繋がってしまう(test33/48で文書化された周期像重複バグ)。そのためtest50では
-    # デフォルト自体を5.0(test47/48/49と同じ修正値)に変更している(test38からの数値上の差分)。
-    p.add_argument("--cutoff", type=positive, default=5.0)  # モデルが実際に使うグラフcutoff
-    p.add_argument("--large-cutoff", type=positive, default=5.0)  # ノイズを加える前に候補として作っておくcutoff(cutoff以上必須)
+    # 13.573A(半箱~6.7865A)しかなく、それを超えるcutoffは同じ原子対が2つ以上の周期像を
+    # 通じて二重に繋がってしまう(test33/48で文書化された周期像重複バグ)。以前は5.0/5.0
+    # だったが、より広い近傍情報を使えるように半箱ぎりぎりまで引き上げた: cutoff=6.5
+    # (半箱まで0.29Aの余裕)、large-cutoff=6.7(cutoffより0.2Aだけ広く候補エッジを作り、
+    # sigma-maxを上げたことによるノイズでのエッジ変化に多少の余裕を持たせる。それでも
+    # 半箱(6.7865A)未満に収まっている)。cutoff=8のような値は、この箱サイズでは
+    # large-cutoffをcutoffと同じかそれ以上にできず原理的に安全に使えない
+    # (箱自体をタイル化して拡大しない限り不可能)。
+    p.add_argument("--cutoff", type=positive, default=6.5)  # モデルが実際に使うグラフcutoff
+    p.add_argument("--large-cutoff", type=positive, default=6.7)  # ノイズを加える前に候補として作っておくcutoff(cutoff以上必須)
     p.add_argument("--sigma-min", type=positive, default=0.001)
-    p.add_argument("--sigma-max", type=positive, default=0.75)  # 学習時に使うノイズ幅の上限(生成時のt正規化にも使われる)
+    # 元は0.75(test38/DM2共通のデフォルト)。ノイズ最大値を増やす要望に合わせて2倍の1.5に。
+    # (Si-Si最近接距離が~2.97Aなので、sigma=1.5は既に「原子がほぼ完全にかき乱された」
+    # 領域までσレンジを広げることになる。)
+    p.add_argument("--sigma-max", type=positive, default=1.5)  # 学習時に使うノイズ幅の上限(生成時のt正規化にも使われる)
     p.add_argument("--validation-fraction", type=positive, default=0.1)
     p.add_argument("--log-every", type=count, default=100)
     p.set_defaults(handler=train)

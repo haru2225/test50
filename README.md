@@ -20,15 +20,32 @@ validated for test47/48/49 (`simu_data/reference_frames.npz`, bundled here — 1
 = 64 Si + 128 O, cubic cell 13.573 Å, 300 K NVT) by selecting the 64 Si indices per frame and
 discarding the 128 O positions; the cell is carried through unchanged (only the atom set shrinks).
 
-## The one numeric change from test38.py
+## Numeric differences from test38.py's own argparse defaults
 
-test38's own `--cutoff`/`--large-cutoff` default to 10.0 (tuned for the clay system's larger box).
-This SiO2 box is only 13.573 Å across (half-box ~6.79 Å) — 10 Å would hit the same
-duplicate-periodic-image bug test33/48 document (a cutoff bigger than half the box connects the
-same atom pair through 2+ periodic images at once). **test50's `train` subcommand changes only
-this one default, to 5.0/5.0** (test47/48/49's own fix for the same box). Every other argparse
-default is untouched from test38.py. `generate` has no cutoff flag of its own — it reads whatever
-cutoff the checkpoint was trained with.
+Every default not listed here is untouched from test38.py.
+
+- **`--cutoff`/`--large-cutoff`: 6.5 / 6.7** (was 5.0/5.0). test38's own default is 10.0/10.0,
+  tuned for the clay system's larger box. This SiO2 box is only 13.573 Å across (half-box
+  **~6.7865 Å**) — anything ≥ that hits the duplicate-periodic-image bug test33/48 document (a
+  cutoff bigger than half the box connects the same atom pair through 2+ periodic images at once).
+  **This is a hard ceiling on this box, not a tuning choice** — `--cutoff 8` (as wide as was asked
+  for at one point) is unsafe here no matter what, and can only be done by tiling the reference
+  data into a larger supercell first (not implemented). 6.5/6.7 is as close to that ~6.7865 Å
+  ceiling as is comfortably safe, with a small 0.2 Å margin between `cutoff` and `large-cutoff` for
+  the larger `--sigma-max` below (test47/48/49 used `large_cutoff==cutoff`, i.e. zero margin — this
+  is an incremental improvement, not a full fix; a rattle draw larger than ~0.2 Å can still land
+  outside that margin).
+- **`--sigma-max`: 1.5** (was 0.75, test38/DM2's shared default). Si-Si nearest-neighbor distance
+  is ~2.97 Å, so this already reaches "the atom is effectively scrambled" territory — training now
+  covers a genuinely wider corruption range. Match this with `generate --start-sigma 1.5` (and
+  `--init crystal-noised`, see below) to actually exercise the new range at generation time —
+  `generate`'s own `--start-sigma` default (0.75) is untouched, so it must be passed explicitly.
+- **`--updates`: 20000** (was 6000) — a longer training budget.
+
+A checkpoint trained with these values cannot `--resume` into a directory whose checkpoint used
+different ones (`train`'s resume path checks the full settings dict and refuses on any mismatch,
+`cutoff`/`sigma_max`/`updates` included) — retraining with the new defaults means a **fresh**
+`--output` directory, not resuming an old one.
 
 ## Files
 
