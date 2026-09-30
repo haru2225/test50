@@ -902,6 +902,17 @@ def generate(args):
     # 全reverse_stepsのうち、後半deterministic_steps回は確率的更新をやめて
     # 決定論的なDDIM風更新に切り替える(「ノイズありで大まかに→仕上げは決定論的に」という設計)。
     stochastic_steps = args.reverse_steps - args.deterministic_steps
+    if stochastic_steps <= 0:
+        # --deterministic-steps >= --reverse-stepsだと、確率的(annealed-Langevin)フェーズが
+        # 0回になり、全ステップが決定論的DDIM更新になる(それ自体は有効な設定だが、
+        # reverse_stepsは変えていないので、スケジュールの段数=分解能は変わらない。
+        # 「段数を増やしたい」場合はdeterministic-stepsではなくreverse-steps自体を
+        # 増やす必要がある、と誤解しやすいのでここで明示的に知らせる)。
+        print(f"NOTE: --deterministic-steps ({args.deterministic_steps}) >= --reverse-steps "
+              f"({args.reverse_steps}): every one of the {args.reverse_steps} steps will run "
+              f"the deterministic DDIM branch (stochastic_steps=0, no annealed-noise steps at "
+              f"all). This does NOT make the schedule finer or longer -- to do that, increase "
+              f"--reverse-steps itself.", flush=True)
     deadline = time.monotonic() + args.time_budget_hours * 3600
 
     def save():
