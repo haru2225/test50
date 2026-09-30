@@ -60,7 +60,7 @@ qsub -P PROJECT_ID -v STAGE=train,DATASET=sio2-si-only/dataset-pilot,OUTPUT=sio2
 # override any test50.py train flag via qsub -v, e.g.:
 # qsub -P PROJECT_ID -v STAGE=train,DATASET=...,OUTPUT=...,UPDATES=6000,BATCH_SIZE=16 run_test50.pbs
 
-qsub -P PROJECT_ID -v STAGE=generate,CHECKPOINT=sio2-si-only/checkpoint1/checkpoint.pt,OUTPUT=sio2-si-only/checkpoint1/generated \
+qsub -P PROJECT_ID -v STAGE=generate,CHECKPOINT=sio2-si-only/checkpoint1/checkpoint.pt,OUTPUT=sio2-si-only/checkpoint1/generated,REVERSE_STEPS=3000,DETERMINISTIC_STEPS=300 \
     run_test50.pbs
 ```
 
@@ -70,12 +70,28 @@ Locally (no PBS/Singularity), the same three commands directly:
 python test50.py prepare --output sio2-si-only/dataset-pilot   # uses bundled simu_data/
 python test50.py train --dataset sio2-si-only/dataset-pilot --output sio2-si-only/checkpoint1 --device cuda
 python test50.py generate --checkpoint sio2-si-only/checkpoint1/checkpoint.pt \
-    --output sio2-si-only/checkpoint1/generated --device cuda
+    --output sio2-si-only/checkpoint1/generated --reverse-steps 3000 --deterministic-steps 300 --device cuda
 ```
+
+## Watching the structure form: `trajectory.extxyz`
+
+`generate` always writes `final.extxyz` (last frame only) and, unless `--trajectory-stride 0` is
+passed, also `output/trajectory.extxyz` — every `--trajectory-stride`-th reverse-diffusion step
+(default: every step) as one multi-frame extended-XYZ trajectory, built by re-reading the
+`positions.npy` array `generate` already saves. Open it in OVITO/VMD/ASE's own GUI to watch the Si
+sublattice condense from the injected noise back toward a crystal-like structure step by step; each
+frame's `ase.Atoms.info["step"]` records which reverse-diffusion step it came from. For a long run
+(e.g. `--reverse-steps 3000`), raise `--trajectory-stride` (e.g. to 10) to keep the file smaller.
 
 ## Status
 
-`prepare` → `train` (a handful of updates) → `generate` (a handful of steps) has been run
-end-to-end on CPU as a smoke test (no crash, correct shapes: 64 Si sites, 184 frames, single "Si"
-species) with the new 5.0/5.0 cutoff defaults. **Not yet trained for real** (6000+ updates) or run
-on GPU/HPC; generation quality from a real checkpoint is unverified.
+A real GPU training + `generate --reverse-steps 300 --deterministic-steps 30` (test38's own
+defaults) run has completed end-to-end. Analysis against the training reference (Si-Si nearest-
+neighbor distance and Si-Si-Si angle) shows the sampler moves in the right direction — starting
+from an over-noised configuration (step 30: NN distance collapsed to a 1.4 Å minimum) and
+recovering toward the reference's ~2.97 Å spacing and ~108° tetrahedral-like angle by the final
+step — but has **not fully converged** at only 300 steps: the final structure's bond-length spread
+(σ≈0.11 Å) and angle spread (σ≈29°) are still ~2-3x broader than the real MD reference (σ≈0.04 Å /
+13°). test47-49's own SiO2 generation uses 2900+100 steps for the same box; **increasing
+`--reverse-steps` well above test38's clay-tuned default of 300 is the most likely lever to close
+this gap** (untested at higher step counts so far).

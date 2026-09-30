@@ -3,3 +3,8 @@ __pycache__/
 *.pt
 *.tmp
 /sio2-si-only/
+# generation/training results copied back from the HPC side (not source, don't commit)
+*.extxyz
+/generation.json
+/positions.npy
+/test50/

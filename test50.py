@@ -951,7 +951,31 @@ def generate(args):
     atoms = atoms_from_meta(pos.cpu().numpy(), cell, meta)
     atoms.wrap()
     ase.io.write(output / "final.extxyz", atoms)
+    if args.trajectory_stride > 0:
+        # --trajectory-stride>0なら、結晶構造がステップを追って組み上がっていく様子を
+        # 見られるよう、positions.npy(全ステップの座標)をマルチフレームのextxyzに
+        # 書き出す(可視化ソフト(OVITO/VMD等)でそのままアニメーション再生できる)。
+        write_trajectory_extxyz(output, meta, cell, args.trajectory_stride)
     print(f"Generated {total + 1} frames: {output}")
+
+
+def write_trajectory_extxyz(output, meta, cell, stride):
+    # positions.npy(generate()が保存した全ステップの座標)を読み直し、strideおきの
+    # フレーム(+最終フレームは必ず含める)を1つのマルチフレームextxyzに書き出す。
+    # 各フレームのase.Atoms.infoに"step"を残しておくので、可視化時にステップ番号が分かる。
+    trajectory = np.load(output / "positions.npy", mmap_mode="r")
+    path = output / "trajectory.extxyz"
+    if path.exists():
+        path.unlink()
+    steps = list(range(0, len(trajectory), stride))
+    if steps[-1] != len(trajectory) - 1:
+        steps.append(len(trajectory) - 1)
+    for step in steps:
+        atoms = atoms_from_meta(np.asarray(trajectory[step]), cell, meta)
+        atoms.wrap()
+        atoms.info["step"] = step
+        ase.io.write(path, atoms, append=True)
+    print(f"Trajectory ({len(steps)} frames, stride={stride}): {path}")
 
 
 def parser():
@@ -997,6 +1021,11 @@ def parser():
     p.add_argument("--start-sigma", type=positive, default=0.75)  # 生成開始時のノイズレベル
     p.add_argument("--sigma-min", type=positive, default=0.001)  # 確率的ステップを終える下限ノイズレベル
     p.add_argument("--thermal-scale", type=positive, default=1.0)  # 注入ノイズの強さを調整する倍率
+    p.add_argument("--trajectory-stride", type=nonnegative_count, default=1,
+                   help="Write every Nth generation step (plus the final step) to "
+                        "output/trajectory.extxyz as one multi-frame trajectory, so the "
+                        "structure's step-by-step formation can be viewed (e.g. in OVITO/VMD). "
+                        "0 disables this and only writes final.extxyz.")
     p.set_defaults(handler=generate)
 
     # train/generate共通の引数(出力先・デバイス・乱数シード・時間予算・再開オプションなど)。
